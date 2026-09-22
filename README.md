@@ -1,4 +1,4 @@
-# Reaction-Racer---Bayesian-optimization-for-chemical-reactions
+# Reaction-Racer - Bayesian-optimization-for-chemical-reactions
 Reaction Racer is an intuitive Graphical User Interface (GUI) designed to make Bayesian optimization accessible for tuning chemical reactions.
 
 Built on top of Facebook’s powerful Ax (Adaptive Experimentation) platform, it allows chemists to seamlessly optimize complex reaction conditions—such as yield, temperature, and concentration—without writing a single line of code.
