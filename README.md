@@ -3,7 +3,7 @@ Reaction Racer is an intuitive Graphical User Interface (GUI) designed to make B
 
 Built on top of Facebook’s powerful Ax (Adaptive Experimentation) platform, it allows chemists to seamlessly optimize complex reaction conditions—such as yield, temperature, and concentration—without writing a single line of code.
 
-# Key Features:
+## Key Features:
 
 - No-Code Interface: A streamlined, user-friendly GUI tailored specifically for laboratory workflows and chemical variables.
 
