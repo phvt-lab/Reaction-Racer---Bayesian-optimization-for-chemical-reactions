@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "config": {
+    "name": "Campaign B",
+    "simulation": false,
+    "metrics": [
+      {
+        "name": "Yield",
+        "direction": "maximize"
+      }
+    ],
+    "parameters": [
+      {
+        "name": "temperature",
+        "kind": "range",
+        "low": 50.0,
+        "high": 200.0,
+        "unit": "\u00b0C",
+        "log_scale": false,
+        "choices": []
+      },
+      {
+        "name": "pressure",
+        "kind": "range",
+        "low": 1.0,
+        "high": 10.0,
+        "unit": "bar",
+        "log_scale": false,
+        "choices": []
+      },
+      {
+        "name": "catalyst_loading",
+        "kind": "range",
+        "low": 1.0,
+        "high": 10.0,
+        "unit": "%",
+        "log_scale": false,
+        "choices": []
+      },
+      {
+        "name": "solvent",
+        "kind": "choice",
+        "low": 0.0,
+        "high": 1.0,
+        "unit": "",
+        "log_scale": false,
+        "choices": [
+          "water",
+          "ethanol",
+          "toluene",
+          "acetonitrile"
+        ]
+      },
+      {
+        "name": "freqeuncy",
+        "kind": "choice",
+        "low": 0.0,
+        "high": 1.0,
+        "unit": "",
+        "log_scale": false,
+        "choices": [
+          "50",
+          "100",
+          "150"
+        ]
+      }
+    ]
+  },
+  "finished": false
+}

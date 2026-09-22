@@ -1,0 +1,13 @@
+nicegui
+ax-platform
+plotly
+pandas
+
+# Desktop window (main.py --desktop). pywebview brings its own GUI backend on
+# Windows (pythonnet) and macOS (pyobjc) automatically; Linux needs an explicit
+# backend extra -- [qt] is pywebview's own packaging extra (see its METADATA).
+pywebview
+pywebview[qt]; sys_platform == 'linux'
+
+# Build toolchain used by build.sh (not a runtime dependency of the app itself).
+pyinstaller
