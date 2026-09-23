@@ -4,7 +4,7 @@ import plotly.graph_objects as go
 from nicegui import ui, run
 
 import theme
-from core.campaign import service
+from core.workspace import current_username, service
 
 
 def _step(low: float, high: float) -> float:
@@ -18,7 +18,11 @@ def _step(low: float, high: float) -> float:
 
 @ui.page('/analysis')
 async def analysis_page() -> None:
-    if not service.is_active():
+    if not current_username():
+        ui.navigate.to('/login')
+        return
+    campaign = service.current()
+    if not campaign.is_active():
         with theme.shell('/analysis', 'NO CAMPAIGN'):
             with theme.section_card('NO CAMPAIGN', 'block'):
                 ui.label('Initialize a campaign first.')
@@ -27,17 +31,17 @@ async def analysis_page() -> None:
                     .props('unelevated').classes('neon-btn')
             return
 
-    cfg = service.config
+    cfg = campaign.config
     range_specs = [p for p in cfg.parameters if p.kind == 'range']
     choice_specs = [p for p in cfg.parameters if p.kind == 'choice']
 
-    if len(range_specs) < 2 or len(service.history()) < 2:
+    if len(range_specs) < 2 or len(campaign.history()) < 2:
         with theme.shell('/analysis', 'MODEL ANALYSIS: PARAMETER SPACE'):
             with theme.section_card('NOT ENOUGH DATA', 'hourglass_empty'):
                 ui.label('The response surface needs ≥2 range parameters and '
                          '≥2 completed trials.')
                 ui.button('GO TO DASHBOARD', icon='speed', color=None,
-                          on_click=lambda: ui.navigate.to('/')) \
+                          on_click=lambda: ui.navigate.to('/campaign')) \
                     .props('unelevated').classes('neon-btn')
         return
 
@@ -125,17 +129,17 @@ async def analysis_page() -> None:
             return
         objective = objective_select.value or cfg.primary.name
         fixed = {k: v for k, v in fixed_values.items() if k not in (x_name, y_name)}
-        plot_panel(caption='Computing posterior predictions…')
+        plot_panel.refresh(None, 'Computing posterior predictions…')
         try:
-            data = await run.io_bound(service.surface, x_name, y_name, fixed, 25,
+            data = await run.io_bound(campaign.surface, x_name, y_name, fixed, 25,
                                       objective)
         except Exception as exc:
             ui.notify(f'Surface computation failed: {exc}', type='negative',
                       timeout=6000)
-            plot_panel(caption=f'Error: {exc}')
+            plot_panel.refresh(None, f'Error: {exc}')
             return
 
-        observed = service.history()
+        observed = campaign.history()
         fig = go.Figure()
         if mode_toggle.value == '3D Surface':
             fig.add_trace(go.Surface(
@@ -176,4 +180,4 @@ async def analysis_page() -> None:
         mean_std = data.get('mean_std')
         if mean_std is not None:
             caption += f' · mean predictive σ at observed trials: {float(mean_std):.3g}'
-        plot_panel(fig, caption)
+        plot_panel.refresh(fig, caption)

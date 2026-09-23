@@ -4,12 +4,16 @@ from nicegui import ui, run
 
 import theme
 from core import simulation
-from core.campaign import (CampaignConfig, MetricSpec, ParameterSpec,
-                           service, validate_config)
+from core.campaign import CampaignConfig, MetricSpec, ParameterSpec, validate_config
+from core.workspace import current_username, service
 
 
 @ui.page('/config')
 def config_page() -> None:
+    if not current_username():
+        ui.navigate.to('/login')
+        return
+    username = current_username()
     # --- page state (local = per user) ---
     rows: list[dict] = [
         {'name': 'temperature', 'kind': 'range', 'low': 50.0, 'high': 200.0,
@@ -100,22 +104,15 @@ def config_page() -> None:
         if errors:
             ui.notify('; '.join(errors), type='negative', position='top', timeout=5000)
             return
-        if service.is_active():
-            confirm_dialog.open()
-        else:
-            await _do_initialize()
-
-    async def _do_initialize() -> None:
-        confirm_dialog.close()
         new_config = _build_config()
         try:
-            await run.io_bound(service.create, new_config)
+            await run.io_bound(service.create_for, username, new_config)
         except Exception as exc:
             ui.notify(f'Initialization failed: {exc}', type='negative', timeout=6000)
             return
         theme.refresh_status()
         ui.notify(f'Campaign "{new_config.name}" initialized!', type='positive')
-        ui.navigate.to('/')
+        ui.navigate.to('/campaign')
 
     # --- param editor helpers (must exist before the build references them) ---
     def _kind_changed(event, row: dict) -> None:
@@ -132,11 +129,12 @@ def config_page() -> None:
         param_editor.refresh()
 
     # --- page build (every element inside its intended card) ---
-    active = service.config if service.is_active() else None
+    active_service = service.current()
+    active = active_service.config if active_service.is_active() else None
 
     with theme.shell('/config', 'CAMPAIGN CONFIGURATION'):
         if active is not None:
-            with theme.section_card(f'CURRENT: {active.name}', 'flag', magenta=True):
+            with theme.section_card(f'ACTIVE: {active.name}', 'flag', magenta=True):
                 with ui.row().classes('items-center gap-4 flex-wrap'):
                     ui.label('Objectives: ' + ' · '.join(
                         f"{m.name} {'↓' if m.direction == 'minimize' else '↑'}"
@@ -144,7 +142,8 @@ def config_page() -> None:
                     ui.label(f'Metrics: {", ".join(m.name for m in active.metrics)}')
                     ui.label(f'Parameters: {len(active.parameters)}')
                     ui.label(f'Mode: {"Simulation" if active.simulation else "Manual"}')
-                ui.label('Initializing below REPLACES this campaign and all of its trials.') \
+                ui.label('Initializing below creates a new stored campaign and makes '
+                         'it active. Existing campaigns and trials are preserved.') \
                     .classes('text-orange-300')
 
         with theme.section_card('CAMPAIGN', 'science'):
@@ -228,14 +227,4 @@ def config_page() -> None:
                       color=None, on_click=_on_initialize) \
                 .props('unelevated').classes('neon-btn-big')
 
-        with ui.dialog() as confirm_dialog, ui.card().classes('neon-card-magenta p-6'):
-            ui.label('Replace the current campaign?').classes('neon-section text-h6')
-            ui.label('All trials of the active campaign will be deleted.')
-            with ui.row().classes('w-full justify-end gap-2'):
-                ui.button('Cancel', color=None,
-                          on_click=confirm_dialog.close) \
-                    .props('flat').classes('text-purple-200')
-                ui.button('REPLACE', color=None,
-                          on_click=_do_initialize) \
-                    .props('unelevated').classes('neon-btn-hot')
-
+        # Campaign creation always preserves the existing workspace library.

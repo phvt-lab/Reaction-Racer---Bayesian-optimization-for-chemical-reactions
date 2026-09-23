@@ -4,7 +4,7 @@ from contextlib import contextmanager
 
 from nicegui import app, ui
 
-from core.campaign import service
+from core.workspace import current_username, logout, service
 
 # Neon brand palette: replaces the default NiceGUI/Quasar Material blue on every
 # control which still uses a stock color (switches, checkboxes, toggle, spinner,
@@ -105,7 +105,8 @@ def style_figure(fig):
 
 
 NAV = [
-    ('/', 'speed', 'Dashboard'),
+    ('/', 'folder_open', 'Campaigns'),
+    ('/campaign', 'speed', 'Active campaign'),
     ('/config', 'tune', 'Configure'),
     ('/results', 'emoji_events', 'Results'),
     ('/analysis', 'analytics', 'Model'),
@@ -177,6 +178,12 @@ def shell(active: str, subtitle: str = ''):
                       on_click=lambda p=path: ui.navigate.to(p)) \
                 .props('flat no-caps').classes(style)
         _header_status()
+        if current_username():
+            ui.chip(current_username(), icon='person', color='cyan') \
+                .props('outline dense')
+            ui.button('LOG OUT', icon='logout', color=None,
+                      on_click=lambda: (logout(), ui.navigate.to('/login'))) \
+                .props('flat no-caps dense').classes('text-purple-200')
     with ui.column().classes('w-full max-w-[1500px] mx-auto p-4 gap-4'):
         if subtitle:
             ui.label(subtitle).classes('neon-title text-h5')

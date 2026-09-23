@@ -11,13 +11,13 @@ import sys
 from nicegui import ui
 
 import theme  # noqa: F401  (registers global CSS)
-import pages.dashboard  # noqa: F401  (registers /)
+from core import storage
+import pages.workspace  # noqa: F401  (registers / and /login)
+import pages.dashboard  # noqa: F401  (registers /campaign)
 import pages.config  # noqa: F401  (registers /config)
 import pages.results  # noqa: F401  (registers /results)
 import pages.analysis  # noqa: F401  (registers /analysis)
-from core.campaign import service
-
-service.load()  # restore persisted shared campaign, if any
+# Campaign state is loaded per username session when a workspace is opened.
 
 
 def _flag(name: str) -> bool:
@@ -29,6 +29,7 @@ if __name__ == '__main__':
     ui.run(
         title='Reaction Racer',
         favicon='⚗️',
+        storage_secret=storage.storage_secret(),
         host='127.0.0.1' if native else '0.0.0.0',
         port=int(os.environ.get('PORT', 8080)),
         dark=True,

@@ -4,7 +4,8 @@ import plotly.graph_objects as go
 from nicegui import ui
 
 import theme
-from core.campaign import MetricSpec, format_value, service
+from core.campaign import MetricSpec, format_value
+from core.workspace import current_username, service
 
 
 def _arrow(metric: MetricSpec) -> str:
@@ -96,21 +97,25 @@ def _podium_card(top, primary: MetricSpec, completed: int) -> None:
 
 @ui.page('/results')
 def results_page() -> None:
+    if not current_username():
+        ui.navigate.to('/login')
+        return
+    campaign = service.current()
     with theme.shell('/results', 'OPTIMIZATION RESULTS: TOP CANDIDATES'):
-        if not service.is_active() or not service.history():
+        if not campaign.is_active() or not campaign.history():
             with theme.section_card('WAITING FOR DATA', 'hourglass_empty'):
                 ui.label('Complete at least one trial to see results.')
                 ui.button('GO TO DASHBOARD', icon='speed', color=None,
-                          on_click=lambda: ui.navigate.to('/')) \
+                          on_click=lambda: ui.navigate.to('/campaign')) \
                     .props('unelevated').classes('neon-btn')
             return
 
-        cfg = service.config
+        cfg = campaign.config
         objectives = cfg.objectives
         primary = cfg.primary
-        records = service.history()
-        pareto = service.pareto_indices()
-        top = service.top_k(3)
+        records = campaign.history()
+        pareto = campaign.pareto_indices()
+        top = campaign.top_k(3)
 
         with ui.row().classes('w-full gap-4 items-stretch flex-wrap'):
             if len(objectives) == 1:
@@ -123,7 +128,7 @@ def results_page() -> None:
                                     'leaderboard', magenta=True):
                 medals = ('🥇', '🥈', '🥉', '', '')
                 rows = []
-                for i, record in enumerate(service.top_k(5), start=1):
+                for i, record in enumerate(campaign.top_k(5), start=1):
                     marks = medals[i - 1]
                     if record.trial_index in pareto:
                         marks = (marks + '⭐') if marks else '⭐'
@@ -153,7 +158,7 @@ def results_page() -> None:
                         ui.label(f'{pname}: {pvalue}').classes('neon-green')
                 else:
                     ui.label(f'PARETO SET ({len(pareto)})').classes('neon-section')
-                    ranked = service.top_k(len(records))
+                    ranked = campaign.top_k(len(records))
                     front_records = [r for r in ranked if r.trial_index in pareto]
                     for record in front_records[:6]:
                         params = ', '.join(

@@ -1,14 +1,4 @@
-"""Ax-backed Bayesian optimization campaign (single shared instance).
-
-Wraps the modern ``ax.api.Client`` (the ``AxClient`` service API is deprecated
-as of Ax 1.3). One campaign at a time, persisted as two atomic files in
-``data/``: ``campaign.json`` (our config) and ``ax_snapshot.json`` (Ax
-experiment + generation strategy, via Ax's public JSON snapshot API).
-
-Multi-objective by configuration: every metric carries a direction
-(maximize / minimize / record-only); two or more maximizing/minimizing
-metrics make Ax run a Pareto (EHVI-style) optimization.
-"""
+"""Ax-backed Bayesian optimization campaign scoped to one user workspace."""
 
 from __future__ import annotations
 
@@ -18,6 +8,7 @@ import threading
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Literal
+from datetime import datetime, timezone
 
 from ax.analysis.plotly.cross_validation import CrossValidationPlot
 from ax.api.client import Client
@@ -244,40 +235,58 @@ def _extract_r2(cards: Any) -> dict[str, float]:
 
 
 class CampaignService:
-    """Process-wide singleton owning one Ax ``Client`` and its config."""
+    """Own one Ax ``Client`` and its config for a selected campaign."""
 
-    def __init__(self) -> None:
+    def __init__(self, username: str, campaign_id: str) -> None:
+        self._username = username
+        self._campaign_id = campaign_id
         self._lock = threading.RLock()
         self._client: Client | None = None
         self._config: CampaignConfig | None = None
         self._finished = False
-        self._accuracy: dict[str, float] | None = None  # None = not computed yet
+        self._accuracy: dict[str, float] | None = None
+        # Lock-free read snapshots, replaced atomically under ``_lock`` after
+        # every mutation so page renders never wait on a long suggest/fit.
+        self._records: list[Record] = []
+        self._pending: list[TrialRef] = []
+        self._pareto: frozenset[int] = frozenset()
+
+    @property
+    def campaign_id(self) -> str:
+        return self._campaign_id
+
+    def _paths_ready(self) -> tuple[str, str]:
+        return self._username, self._campaign_id
 
     # ------------------------------------------------------------------ state
 
     def load(self) -> None:
         with self._lock:
-            payload = storage.load()
+            username, campaign_id = self._paths_ready()
+            payload = storage.load(username, campaign_id)
             if payload is None:
-                storage.clear()  # no config: drop any orphan Ax snapshot
+                storage.clear(username, campaign_id)
                 return
             try:
                 cfg = _config_from_dict(payload['config'])
                 self._finished = bool(payload.get('finished', False))
             except (KeyError, TypeError, ValueError):
-                storage.clear()
+                storage.clear(username, campaign_id)
                 return
-            if not storage.snapshot_path().exists():
-                storage.clear()  # config without Ax state cannot resume
+            snapshot = storage.snapshot_path(username, campaign_id)
+            if not snapshot.exists():
+                storage.clear(username, campaign_id)
                 return
             try:
-                client = Client.load_from_json_file(str(storage.snapshot_path()))
+                client = Client.load_from_json_file(str(snapshot))
             except Exception:
-                storage.snapshot_path().rename(
-                    storage.snapshot_path().with_suffix('.json.corrupt'))
-                storage.clear()
+                snapshot.rename(snapshot.with_suffix('.json.corrupt'))
+                storage.clear(username, campaign_id)
                 return
             self._client, self._config = client, cfg
+            self._accuracy = None
+            self._rebuild_read_cache()
+            self._save_config()
 
     def is_active(self) -> bool:
         return self._client is not None
@@ -315,6 +324,7 @@ class CampaignService:
             self._client, self._config = client, cfg
             self._finished = False
             self._accuracy = None
+            self._rebuild_read_cache()
             self._save_config()
             self._write_snapshot()
 
@@ -325,12 +335,22 @@ class CampaignService:
             self._save_config()
 
     def _save_config(self) -> None:
-        storage.save({'version': 1,
-                      'config': _config_to_dict(self._require_cfg()),
-                      'finished': self._finished})
+        username, campaign_id = self._paths_ready()
+        now = datetime.now(timezone.utc).isoformat(timespec='seconds')
+        previous = storage.load(username, campaign_id) or {}
+        storage.save(username, campaign_id, {
+            'version': 1,
+            'config': _config_to_dict(self._require_cfg()),
+            'finished': self._finished,
+            'completed': len(self._records),
+            'running': len(self._pending),
+            'created_at': previous.get('created_at', now),
+            'updated_at': now,
+        })
 
     def _write_snapshot(self) -> None:
-        path = storage.snapshot_path()
+        username, campaign_id = self._paths_ready()
+        path = storage.snapshot_path(username, campaign_id)
         tmp = path.with_suffix('.json.tmp')
         self._require().save_to_json_file(str(tmp))
         tmp.replace(path)  # atomic
@@ -342,6 +362,8 @@ class CampaignService:
             client = self._require()
             trials = client.get_next_trials(max_trials=max(1, int(count)))
             self._write_snapshot()
+            self._rebuild_read_cache()
+            self._save_config()
             return [TrialRef(int(index), dict(params))
                     for index, params in sorted(trials.items())]
 
@@ -364,6 +386,8 @@ class CampaignService:
                 raise ValueError('Missing objective value(s): ' + ', '.join(missing))
             self._require().complete_trial(trial_index=trial_index, raw_data=clean)
             self._write_snapshot()
+            self._rebuild_read_cache()
+            self._save_config()
             self._accuracy = None  # invalidated: completed count changed
 
     # ------------------------------------------------------------- read sides
@@ -397,14 +421,37 @@ class CampaignService:
         records.sort(key=lambda r: r.trial_index)
         return records
 
+    def _rebuild_read_cache(self) -> None:
+        """Refresh the lock-free snapshots (call with ``_lock`` held).
+
+        The snapshots only depend on trials that already exist, so they stay
+        valid for the whole duration of a long-running ``suggest``/fit; new
+        running trials are picked up when the mutation finishes.
+        """
+        if self._client is None or self._config is None:
+            self._records, self._pending, self._pareto = [], [], frozenset()
+            return
+        cfg = self._config
+        self._records = self._rows('completed')
+        self._pending = [TrialRef(r.trial_index, r.parameters)
+                         for r in self._rows('running')]
+        frontier: frozenset[int] = frozenset()
+        if len(cfg.objectives) > 1:
+            try:
+                found = self._client.get_pareto_frontier(
+                    use_model_predictions=False)
+                frontier = frozenset(int(index) for _, _, index, _ in found)
+            except Exception:
+                frontier = frozenset()
+        self._pareto = frontier
+
     def history(self) -> list[Record]:
-        with self._lock:
-            return self._rows('completed')
+        """Completed-trial snapshot; safe to call from the event loop while a
+        long ``suggest`` holds the lock (rebuilt after every mutation)."""
+        return list(self._records)
 
     def pending(self) -> list[TrialRef]:
-        with self._lock:
-            return [TrialRef(r.trial_index, r.parameters)
-                    for r in self._rows('running')]
+        return list(self._pending)
 
     def top_k(self, k: int) -> list[Record]:
         """Completed trials ranked best-first along the primary objective."""
@@ -421,15 +468,7 @@ class CampaignService:
 
     def pareto_indices(self) -> frozenset[int]:
         """Trial indices on the observed Pareto front (empty for 1 objective)."""
-        with self._lock:
-            if len(self._require_cfg().objectives) < 2:
-                return frozenset()
-            try:
-                frontier = self._require().get_pareto_frontier(
-                    use_model_predictions=False)
-            except Exception:
-                return frozenset()
-            return frozenset(int(index) for _, _, index, _ in frontier)
+        return self._pareto
 
     def trace(self, metric: str | None = None) -> tuple[list[int], list[float],
                                                         list[float]]:
@@ -458,23 +497,21 @@ class CampaignService:
     def status_summary(self) -> dict[str, Any]:
         empty = {'active': False, 'name': '', 'completed': 0, 'running': 0,
                  'objectives': '', 'best': '', 'pareto': 0, 'finished': False}
-        with self._lock:
-            if self._client is None:
-                return empty
-            cfg = self._require_cfg()
-            completed = self.history()
-            running = len(self._rows('running'))
-            objectives = ' · '.join(
-                f"{m.name} {'↓' if m.direction == 'minimize' else '↑'}"
-                for m in cfg.objectives)
-            ranked = self.top_k(1)
-            best = (f'{cfg.primary.name} = '
-                    f'{format_value(ranked[0].metrics[cfg.primary.name])}'
-                    if ranked else '—')
-            pareto = len(self.pareto_indices()) if len(cfg.objectives) > 1 else 0
-            return {'active': True, 'name': cfg.name, 'completed': len(completed),
-                    'running': running, 'objectives': objectives, 'best': best,
-                    'pareto': pareto, 'finished': self._finished}
+        cfg = self._config
+        if self._client is None or cfg is None:
+            return empty
+        running = len(self._pending)
+        objectives = ' · '.join(
+            f"{m.name} {'↓' if m.direction == 'minimize' else '↑'}"
+            for m in cfg.objectives)
+        ranked = self.top_k(1)
+        best = (f'{cfg.primary.name} = '
+                f'{format_value(ranked[0].metrics[cfg.primary.name])}'
+                if ranked else '—')
+        pareto = len(self._pareto) if len(cfg.objectives) > 1 else 0
+        return {'active': True, 'name': cfg.name, 'completed': len(self._records),
+                'running': running, 'objectives': objectives, 'best': best,
+                'pareto': pareto, 'finished': self._finished}
 
     # -------------------------------------------------------------- model fit
 
@@ -496,11 +533,25 @@ class CampaignService:
                 self._accuracy = {}
 
     def accuracy(self) -> dict[str, float] | None:
-        """Cached CV R² values; None until first refresh, {} if unavailable."""
-        with self._lock:
-            return self._accuracy
+        """Cached CV R² values; None until first refresh, {} if unavailable.
+
+        Lock-free: ``refresh_accuracy`` only ever rebinds the whole dict."""
+        return self._accuracy
 
     # ---------------------------------------------------------------- surface
+
+    @staticmethod
+    def _ensure_model(client: Client) -> None:
+        """Refit the surrogate if Ax restored it without a fitted adapter.
+
+        Ax's JSON snapshot serializes the experiment and generation strategy
+        but not the fitted model, so ``predict`` fails right after ``load()``
+        until something refits (a suggest, an analysis, ...). Refit lazily so
+        the response surface works on a freshly restarted app too.
+        """
+        gs = client._generation_strategy
+        if gs.adapter is None:
+            gs.fit(experiment=gs.experiment)
 
     def surface(self, x_name: str, y_name: str, fixed: dict[str, Any],
                 resolution: int, metric: str | None = None) -> dict[str, Any]:
@@ -531,6 +582,7 @@ class CampaignService:
             xs = _axis_values(mapping[x_name], n)
             ys = _axis_values(mapping[y_name], n)
             points = [{**fixed, x_name: x, y_name: y} for y in ys for x in xs]
+            self._ensure_model(client)
             predictions = client.predict(points)
             z: list[list[float]] = []
             sems: list[float] = []
@@ -550,4 +602,3 @@ class CampaignService:
                     'mean_std': sum(sems) / len(sems) if sems else None}
 
 
-service = CampaignService()

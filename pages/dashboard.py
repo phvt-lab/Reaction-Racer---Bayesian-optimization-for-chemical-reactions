@@ -8,13 +8,17 @@ from nicegui import ui, run
 
 import theme
 from core import simulation
-from core.campaign import format_value, service
+from core.workspace import current_username, service
 
 
-@ui.page('/')
+@ui.page('/campaign')
 async def dashboard() -> None:
-    if not service.is_active():
-        with theme.shell('/', 'NO ACTIVE CAMPAIGN'):
+    if not current_username():
+        ui.navigate.to('/login')
+        return
+    campaign = service.current()
+    if not campaign.is_active():
+        with theme.shell('/campaign', 'NO ACTIVE CAMPAIGN'):
             with theme.section_card('GETTING STARTED', 'rocket_launch'):
                 ui.label('Configure objectives and parameters to start optimizing.')
                 ui.button('OPEN CAMPAIGN CONFIGURATION', icon='tune',
@@ -23,9 +27,9 @@ async def dashboard() -> None:
                     .props('unelevated').classes('neon-btn')
         return
 
-    cfg = service.config
+    cfg = campaign.config
 
-    with theme.shell('/', f'ACTIVE OPTIMIZATION: {cfg.name}'):
+    with theme.shell('/campaign', f'ACTIVE OPTIMIZATION: {cfg.name}'):
         with ui.row().classes('w-full gap-4 items-start flex-wrap'):
             with ui.column().classes('flex-[2_1_480px] gap-4'):
                 # --- progress trace ---
@@ -34,7 +38,7 @@ async def dashboard() -> None:
                     @ui.refreshable
                     def progress_panel() -> None:
                         metric = trace_select.value or cfg.primary.name
-                        xs, observed, best = service.trace(metric)
+                        xs, observed, best = campaign.trace(metric)
                         if not xs:
                             ui.label('No completed trials yet — suggest and submit your '
                                      'first experiment.').classes('text-purple-300')
@@ -71,7 +75,7 @@ async def dashboard() -> None:
 
                     @ui.refreshable
                     def history_panel() -> None:
-                        records = service.history()
+                        records = campaign.history()
                         if not records:
                             ui.label('Completed trials will appear here.') \
                                 .classes('text-purple-300')
@@ -103,7 +107,7 @@ async def dashboard() -> None:
 
                     @ui.refreshable
                     def experiment_panel() -> None:
-                        pending = service.pending()
+                        pending = campaign.pending()
                         for trial in pending:
                             with ui.card().classes('neon-card w-full p-2'):
                                 ui.label(f'Trial {trial.trial_index}') \
@@ -161,7 +165,7 @@ async def dashboard() -> None:
                             span = ', '.join(p.choices)
                         unit = f' {p.unit}' if p.unit else ''
                         ui.label(f'{p.name}: {span}{unit}').classes('text-purple-300 text-sm')
-                    if service.finished:
+                    if campaign.finished:
                         ui.label('🏁 RACE COMPLETED').classes('neon-amber text-h6')
                     else:
                         ui.button('END RACE', icon='flag', color=None,
@@ -179,25 +183,41 @@ async def dashboard() -> None:
         history_panel.refresh()
         theme.refresh_status()
 
-    def _finish() -> None:
-        service.finish()
+    async def _finish() -> None:
+        # Worker thread: service.finish() takes the campaign lock, which a
+        # concurrent suggest may hold for a long time — never block the loop.
+        try:
+            await run.io_bound(campaign.finish)
+        except Exception as exc:
+            ui.notify(f'Could not finish the race: {exc}', type='negative',
+                      timeout=6000)
+            return
         _refresh_all()
         ui.notify('Race completed — campaign marked finished 🏁', type='positive')
+
+    def _ui_safe(action) -> None:
+        """Apply a UI update, ignoring the deleted-slot error raised when the
+        page was closed while an awaited service call was still running."""
+        try:
+            action()
+        except RuntimeError:
+            pass
 
     async def _suggest(batch) -> None:
         count = int(batch.value or 1)
         note = ui.notification('Fitting model and suggesting…', spinner=True)
         try:
-            trials = await run.io_bound(service.suggest, count)
+            trials = await run.io_bound(campaign.suggest, count)
         except Exception as exc:
             note.dismiss()
             ui.notify(f'Suggestion failed: {exc}', type='negative', timeout=6000)
             return
         note.dismiss()
-        ui.notify(f'{len(trials)} trial(s) suggested', type='positive')
-        _refresh_all()
-        await run.io_bound(service.refresh_accuracy)
-        theme.refresh_status()
+        _ui_safe(lambda: ui.notify(f'{len(trials)} trial(s) suggested',
+                                   type='positive'))
+        _ui_safe(_refresh_all)
+        await run.io_bound(campaign.refresh_accuracy)
+        _ui_safe(theme.refresh_status)
 
     async def _simulate(trial) -> None:
         values = simulation.evaluate(trial.parameters, cfg.parameters,
@@ -219,7 +239,7 @@ async def dashboard() -> None:
 
     async def _complete(trial, values: dict) -> None:
         try:
-            await run.io_bound(service.complete, trial.trial_index, values)
+            await run.io_bound(campaign.complete, trial.trial_index, values)
         except (ValueError, KeyError) as exc:
             ui.notify(str(exc), type='negative', timeout=6000)
             return
@@ -234,12 +254,12 @@ async def dashboard() -> None:
         else:
             ui.notify(f'Trial {trial.trial_index} completed', type='positive')
         _refresh_all()
-        await run.io_bound(service.refresh_accuracy)
+        await run.io_bound(campaign.refresh_accuracy)
         theme.refresh_status()
 
     async def _warm_model_chip() -> None:
-        if service.is_active() and service.accuracy() is None:
-            await run.io_bound(service.refresh_accuracy)
-            theme.refresh_status()
+        if campaign.is_active() and campaign.accuracy() is None:
+            await run.io_bound(campaign.refresh_accuracy)
+            _ui_safe(theme.refresh_status)
 
     asyncio.create_task(_warm_model_chip())
